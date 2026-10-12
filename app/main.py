@@ -1,21 +1,21 @@
-from fastapi import FastAPI, HTTPException, Header, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
-from pathlib import Path
 import uuid
-
-from app.graph import breakdown_graph
-from app.config import GOOGLE_API_KEY, APP_API_KEY
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from app.schemas import ChatRequest, ChatResponse, HealthResponse
+from app.graph import roadside_graph
+from app.config import OPENAI_MODEL, OPENAI_API_KEY
 
 app = FastAPI(
-    title="CypherPunks Emergency Vehicle & Roadside Assistance AI",
-    description="Intelligent in-vehicle diagnostic and roadside triage chatbot powered by Google Gemini.",
-    version="2.0.0"
+    title="CypherPunks Roadside & Vehicle Assistance AI API",
+    description=(
+        "Specialized AI backend for vehicle breakdown emergencies, roadside assistance, "
+        "and automotive troubleshooting using FastAPI, LangChain, and LangGraph. "
+        "Strictly filters out non-vehicle queries."
+    ),
+    version="1.0.0"
 )
 
+# Enable CORS for cross-platform integration (Web, Mobile, etc.)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,123 +24,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SESSION_STORE: Dict[str, List[Dict[str, str]]] = {}
 
-
-class ChatRequest(BaseModel):
-    message: str = Field(..., example="Why is my car AC blowing hot air?")
-    session_id: Optional[str] = Field(default=None, example="driver-session-123")
-    api_key: Optional[str] = Field(default=None, example="cypherpunks-secret-key-2024")
-
-
-class ChatResponse(BaseModel):
-    session_id: str
-    is_car_related: bool
-    response: str
-    urgency: str
-
-
-class SOSRequest(BaseModel):
-    driver_name: Optional[str] = "Stranded Driver"
-    phone: Optional[str] = "Unknown"
-    location_desc: str = Field(..., example="NH44, 25km before toll plaza")
-    issue_type: str = Field(..., example="Flat tyre and no spare jack")
-    api_key: Optional[str] = None
-
-
-def verify_client_key(header_key: Optional[str], body_key: Optional[str], query_key: Optional[str]):
-    if not APP_API_KEY:
-        return True
-    provided = header_key or body_key or query_key
-    if not provided or provided.strip() != APP_API_KEY.strip():
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized: Missing or invalid API key. Set 'X-API-Key' header or 'api_key' in body."
-        )
-    return True
-
-
-@app.get("/api/health")
-def health_check():
+@app.get("/", tags=["General"])
+async def root():
     return {
+        "project": "CypherPunks Roadside & Vehicle Assistance AI",
+        "description": "AI assistance API for stranded drivers, vehicle mechanical/electrical issues, and roadside breakdowns.",
+        "documentation": "/docs",
         "status": "online",
-        "service": "CypherPunks AI Roadside Assistant",
-        "llm_engine": "Google Gemini",
-        "google_key_configured": bool(GOOGLE_API_KEY and len(GOOGLE_API_KEY) > 10),
-        "api_key_protection_active": bool(APP_API_KEY)
+        "chat_endpoint": "/api/chat"
     }
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat_endpoint(
-    payload: ChatRequest,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    api_key: Optional[str] = Query(None)
-):
-    verify_client_key(x_api_key, payload.api_key, api_key)
-
-    user_query = payload.message.strip()
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
-
-    session_id = payload.session_id or str(uuid.uuid4())
-    if session_id not in SESSION_STORE:
-        SESSION_STORE[session_id] = []
-
-    history = SESSION_STORE[session_id]
-
-    inputs = {
-        "messages": history,
-        "query": user_query,
-        "is_car_related": False,
-        "urgency": "PENDING",
-        "diagnosis": "",
-        "response": ""
-    }
-
-    try:
-        result = breakdown_graph.invoke(inputs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI execution error: {str(e)}")
-
-    is_car = result.get("is_car_related", False)
-    raw_response = result.get("response", "Could not process request.")
-
-    if isinstance(raw_response, list):
-        bot_response = "\n".join([item.get("text", str(item)) if isinstance(item, dict) else str(item) for item in raw_response])
-    else:
-        bot_response = str(raw_response)
-
-    urgency = str(result.get("urgency", "UNKNOWN"))
-
-    SESSION_STORE[session_id].append({"role": "user", "content": user_query})
-    SESSION_STORE[session_id].append({"role": "assistant", "content": bot_response})
-    if len(SESSION_STORE[session_id]) > 20:
-        SESSION_STORE[session_id] = SESSION_STORE[session_id][-20:]
-
-    return ChatResponse(
-        session_id=session_id,
-        is_car_related=is_car,
-        response=bot_response,
-        urgency=urgency
+@app.get("/health", response_model=HealthResponse, tags=["General"])
+async def health_check():
+    return HealthResponse(
+        status="healthy",
+        service="CypherPunks Roadside Assistance API",
+        version="1.0.0",
+        model=OPENAI_MODEL
     )
 
 
-@app.post("/api/sos")
-async def trigger_sos(payload: SOSRequest):
-    sos_id = f"SOS-{uuid.uuid4().hex[:6].upper()}"
+@app.get("/api/info", tags=["Information"])
+async def project_info():
     return {
-        "sos_id": sos_id,
-        "status": "DISPATCH_PENDING",
-        "message": f"Emergency roadside broadcast created for {payload.location_desc}.",
-        "details": payload.model_dump()
+        "problem_statement": (
+            "Every day, thousands of drivers get stuck on highways, remote roads, or hilly areas "
+            "because of sudden vehicle breakdowns such as flat tyres, engine problems, or low fuel. "
+            "Drivers often lack RSA plans, and existing services are slow, limited, and urban-centric."
+        ),
+        "solution": (
+            "An intelligent AI-powered automotive diagnostic and roadside assistant that immediately "
+            "triages emergencies, delivers step-by-step DIY safety and repair instructions, handles remote/highway "
+            "scenarios, and strictly rejects any non-vehicle inquiries."
+        ),
+        "team": "CypherPunks",
+        "stack": ["FastAPI", "LangChain", "LangGraph", "OpenAI GPT-4"]
     }
 
 
-static_dir = Path(__file__).resolve().parent.parent / "static"
-if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+@app.post("/api/chat", response_model=ChatResponse, tags=["Chat"])
+async def chat_endpoint(request: ChatRequest):
+    """
+    Primary API endpoint for drivers and roadside assistance queries.
+    
+    - Evaluates if the query is strictly vehicle / automotive / breakdown related.
+    - If unrelated: Strictly stops and returns a polite rejection notice.
+    - If vehicle-related: Invokes LangGraph to generate immediate safety protocols and troubleshooting steps.
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OPENAI_API_KEY is not configured in the backend environment."
+        )
 
-    @app.get("/")
-    def serve_index():
-        return FileResponse(str(static_dir / "index.html"))
+    session_id = request.session_id or str(uuid.uuid4())
+
+    try:
+        initial_state = {
+            "message": request.message,
+            "location_context": request.location_context,
+            "vehicle_type": request.vehicle_type,
+            "session_id": session_id,
+            "is_vehicle_related": False,
+            "category": "pending",
+            "response": ""
+        }
+
+        # Execute through the compiled LangGraph workflow
+        final_state = await roadside_graph.ainvoke(initial_state)
+
+        is_vehicle = final_state.get("is_vehicle_related", False)
+        status_flag = "success" if is_vehicle else "rejected_out_of_scope"
+
+        return ChatResponse(
+            response=final_state.get("response", ""),
+            is_vehicle_related=is_vehicle,
+            category=final_state.get("category", "out_of_scope"),
+            session_id=session_id,
+            status=status_flag
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error executing roadside assistance workflow: {str(e)}"
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    from app.config import HOST, PORT
+    uvicorn.run("app.main:app", host=HOST, port=PORT, reload=True)
